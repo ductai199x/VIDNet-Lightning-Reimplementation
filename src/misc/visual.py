@@ -1,24 +1,25 @@
 import skimage
 import numpy as np
 
-def overlay(image,mask,colors=[255,0,0],cscale=2,alpha=0.4):
-  """ Overlay segmentation on top of RGB image. """
 
-  colors = np.atleast_2d(colors) * cscale
+def overlay(image, mask, colors=[255, 0, 0], cscale=2, alpha=0.4):
+    """Overlay segmentation on top of RGB image."""
 
-  im_overlay    = image.copy()
-  object_ids = np.unique(mask)
+    colors = np.atleast_2d(colors) * cscale
 
-  for object_id in object_ids[1:]:
-    # Overlay color on  binary mask
+    im_overlay = image.copy()
+    object_ids = np.unique(mask)
 
-    foreground  = image*alpha + np.ones(image.shape)*(1-alpha) * np.array(colors[object_id])
-    binary_mask = mask == object_id
+    for object_id in object_ids[1:]:
+        # Overlay color on  binary mask
 
-    # Compose image
-    im_overlay[binary_mask] = foreground[binary_mask]
+        foreground = image * alpha + np.ones(image.shape) * (1 - alpha) * np.array(colors[object_id])
+        binary_mask = mask == object_id
 
-    countours = skimage.morphology.binary.binary_dilation(binary_mask) - binary_mask
-    im_overlay[countours,:] = 0
+        # Compose image
+        im_overlay[binary_mask] = foreground[binary_mask]
 
-  return im_overlay.astype(image.dtype)
+        countours = skimage.morphology.binary.binary_dilation(binary_mask) - binary_mask
+        im_overlay[countours, :] = 0
+
+    return im_overlay.astype(image.dtype)
