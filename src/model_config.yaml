@@ -1,0 +1,31 @@
+model_args: {
+  encoder: {
+    base_model: "vgg16_bn",
+    dropout: 0.5,
+    hidden_size: 512,
+    kernel_size: 3,  # Convolution kernel size
+    input_dim: 3,  # Input image channel
+    use_gpu: False,
+  },
+  decoder: {
+    hidden_size: 512,
+    kernel_size: 3,  # Convolution kernel size
+    use_gpu: False,
+    skip_mode: "concat",
+    dropout: 0.5,
+  },
+}
+training_args: {
+  encoder_lr: 1.0e-4,
+  encoder_weight_decay: 5.0e-5,
+  decoder_lr: 1.0e-3,
+  decoder_weight_decay: 5.0e-5,
+  encoder_lr_decay_rate: 0.1,
+  decoder_lr_decay_rate: 0.1,
+  encoder_lr_decay_step: 30,
+  decoder_lr_decay_step: 30,
+  max_epochs: 40,
+  batch_size: 1,
+  num_workers: 3,
+  max_seq_length: 5,
+}

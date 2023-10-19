@@ -1,6 +1,10 @@
+import wandb
+from wandb.sdk.wandb_run import Run
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 from lightning.pytorch import LightningModule
 from torchmetrics.classification import BinaryF1Score, BinaryJaccardIndex
 
@@ -37,9 +41,36 @@ class TrainingConfig:
     encoder_weight_decay: float = 5.0e-5
     decoder_lr: float = 1.0e-3
     decoder_weight_decay: float = 5.0e-5
+    encoder_lr_decay_rate: float = 0.1
+    decoder_lr_decay_rate: float = 0.1
+    encoder_lr_decay_step: int = 30
+    decoder_lr_decay_step: int = 30
+    
+    def __new__(cls, *args, **kwargs):
+        try:
+            initializer = cls.__initializer
+        except AttributeError:
+            # Store the original init on the class in a different place
+            cls.__initializer = initializer = cls.__init__
+            # replace init with something harmless
+            cls.__init__ = lambda *a, **k: None
+
+        # code from adapted from Arne
+        added_args = {}
+        for name in list(kwargs.keys()):
+            if name not in cls.__annotations__:
+                added_args[name] = kwargs.pop(name)
+
+        ret = object.__new__(cls)
+        initializer(ret, **kwargs)
+        # ... and add the new ones by hand
+        for new_name, new_val in added_args.items():
+            setattr(ret, new_name, new_val)
+
+        return ret
 
 
-class VIDNet(LightningModule):
+class VIDNetPLWrapper(LightningModule):
     def __init__(
         self,
         encoder_config: EncoderConfig,
@@ -51,12 +82,16 @@ class VIDNet(LightningModule):
         self.decoder = RSIS(decoder_config)
         self.training_config = training_config
 
-        self.mask_soft_iou_loss = SoftIoULoss()
+        # self.mask_soft_iou_loss = SoftIoULoss()
 
         self.train_f1 = BinaryF1Score()
         self.train_jaccard = BinaryJaccardIndex()
         self.val_f1 = BinaryF1Score()
         self.val_jaccard = BinaryJaccardIndex()
+
+        self.save_hyperparameters()
+
+        self.automatic_optimization = False
 
     def forward(self, x, x_ela):
         T, C, H, W = x.shape
@@ -81,16 +116,61 @@ class VIDNet(LightningModule):
         output_mask = self.decoder.conv_out(output_masks).squeeze()  # 1, 1, H, W -> H, W
         output_mask = torch.sigmoid(output_mask)
         return output_mask
+    
+    @torch.no_grad()
+    def log_loc_output(self, x, x_ela, gt_mask, pred_mask, step_idx):
+        x = x.detach().cpu()
+        x_ela = x_ela.detach().cpu()
+        gt_mask = gt_mask.float().detach().cpu()
+        pred_mask = pred_mask.float().detach().cpu()
+        logger = self.logger.experiment
+        if isinstance(logger, Run):
+            log_images = []
+            log_images.append(wandb.Image(x, caption="input"))
+            log_images.append(wandb.Image(x_ela, caption="ela"))
+            log_images.append(wandb.Image(gt_mask, caption="gt_mask"))
+            log_images.append(wandb.Image(pred_mask, caption="pred_mask"))
+            logger.log({"train_loc_output": log_images}, step=step_idx)
+        elif isinstance(logger, SummaryWriter):
+            logger.add_images("train_loc_x", x, dataformats="CHW", global_step=step_idx)
+            logger.add_images("train_loc_x_ela", x_ela, dataformats="CHW", global_step=step_idx)
+            logger.add_images("train_loc_gt", gt_mask, dataformats="HW", global_step=step_idx)
+            logger.add_images("train_loc_pred", pred_mask, dataformats="HW", global_step=step_idx)
+        else:
+            pass
 
     def training_step(self, batch, batch_idx):
-        x, x_ela, y = batch
-        y_hat = self(x, x_ela)
-        loss = self.mask_soft_iou_loss(y_hat, y)
+        enc_opt, dec_opt = self.optimizers()
+        x, x_ela, gt_mask, label = batch
+        B, T, C, H, W = x.shape
 
-        print(loss.shape, loss)
+        loss = 0
+        for b in range(B):
+            y_hat = self(x[b], x_ela[b])
+            # loss += self.mask_soft_iou_loss(y_hat, gt_mask[b])
+            loss += F.binary_cross_entropy(y_hat, gt_mask[b])
 
-        self.train_f1.update(y_hat, y)
-        self.train_jaccard.update(y_hat, y)
+            self.train_f1.update(y_hat, gt_mask[b])
+            self.train_jaccard.update(y_hat, gt_mask[b])
+
+        if self.global_step % 200 == 0:
+            self.log_loc_output(x[b][T-1], x_ela[b][T-1], gt_mask[b][T-1], y_hat[T-1], self.global_step)
+
+        enc_opt.zero_grad()
+        dec_opt.zero_grad()
+        self.manual_backward(loss)
+        enc_opt.step()
+        dec_opt.step()
+        # if batch_idx % 2 == 0:
+        #     enc_opt.zero_grad()
+        # else:
+        #     dec_opt.zero_grad()
+        # self.manual_backward(loss)
+        
+        # if batch_idx % 2 == 0:
+        #     enc_opt.step()
+        # else:
+        #     dec_opt.step()
 
         self.log("train_loss", loss, prog_bar=True, sync_dist=True)
         self.log("train_f1", self.train_f1, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -98,15 +178,18 @@ class VIDNet(LightningModule):
             "train_jaccard", self.train_jaccard, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True
         )
 
-        return loss
-
     def validation_step(self, batch, batch_idx):
-        x, x_ela, y = batch
-        y_hat = self(x, x_ela)
-        loss = self.mask_soft_iou_loss(y_hat, y)
+        x, x_ela, gt_mask, label = batch
+        B, T, C, H, W = x.shape
+        
+        loss = 0
+        for b in range(B):
+            y_hat = self(x[b], x_ela[b])
+            # loss += self.mask_soft_iou_loss(y_hat, gt_mask[b])
+            loss += F.binary_cross_entropy(y_hat, gt_mask[b])
 
-        self.val_f1.update(y_hat, y)
-        self.val_jaccard.update(y_hat, y)
+            self.val_f1.update(y_hat, gt_mask[b])
+            self.val_jaccard.update(y_hat, gt_mask[b])
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("val_f1", self.val_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -126,7 +209,7 @@ class VIDNet(LightningModule):
             weight_decay=self.training_config.decoder_weight_decay,
         )
 
-        encoder_scheduler = torch.optim.lr_scheduler.StepLR(encoder_optimizer, step_size=30, gamma=0.1)
-        decoder_scheduler = torch.optim.lr_scheduler.StepLR(decoder_optimizer, step_size=30, gamma=0.1)
+        encoder_scheduler = torch.optim.lr_scheduler.StepLR(encoder_optimizer, step_size=self.training_config.encoder_lr_decay_step, gamma=self.training_config.encoder_lr_decay_rate)
+        decoder_scheduler = torch.optim.lr_scheduler.StepLR(decoder_optimizer, step_size=self.training_config.decoder_lr_decay_step, gamma=self.training_config.decoder_lr_decay_rate)
 
         return [encoder_optimizer, decoder_optimizer], [encoder_scheduler, decoder_scheduler]
