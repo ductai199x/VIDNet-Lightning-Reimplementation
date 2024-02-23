@@ -26,6 +26,12 @@ training_args: {
   decoder_lr_decay_step: 30,
   max_epochs: 40,
   batch_size: 1,
-  num_workers: 3,
+  num_workers: 4,
   max_seq_length: 5,
+  manip_types: {
+    # local-splicing: 2000,
+    # local-editing: 2000,
+    # deepfake: 2000,
+    inpainting: 1000,
+  }
 }

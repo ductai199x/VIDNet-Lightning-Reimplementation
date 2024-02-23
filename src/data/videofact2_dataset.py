@@ -6,7 +6,7 @@ import pandas as pd
 
 import torch
 from torch.utils.data import Dataset
-from torchvision.transforms.functional import crop
+from torchvision.transforms.functional import crop, resize
 
 from tqdm.auto import tqdm
 from typing import *
@@ -23,6 +23,7 @@ class VideoFact2Dataset(Dataset):
         crfs: Union[None, List[str]] = None,
         max_num_return_frames: int = 5,
         return_frame_size: Union[None, Tuple[int, int]] = (1080, 1920),
+        frame_size_op: Literal["crop", "resize"] = "crop",
     ):
         self.root_dir = root_dir
         self.split = split
@@ -34,6 +35,7 @@ class VideoFact2Dataset(Dataset):
         self.crfs = crfs
         self.max_num_return_frames = max_num_return_frames
         self.return_frame_size = return_frame_size
+        self.frame_size_op = frame_size_op
 
         assert (
             self.metadata["num_frames"].min() >= self.max_num_return_frames
@@ -41,9 +43,12 @@ class VideoFact2Dataset(Dataset):
 
         self.data_samples = self.create_frame_level_data() if self.return_type == "frame" else self.create_video_level_data()
 
-    def _pad(self, x):
+    def _size_op(self, x):
         if self.return_frame_size is not None:
-            return crop(x, 0, 0, *self.return_frame_size)
+            if self.frame_size_op == "resize":
+                return resize(x, self.return_frame_size, antialias=True)
+            else:
+                return crop(x, 0, 0, *self.return_frame_size)
         else:
             return x
 
@@ -97,8 +102,8 @@ class VideoFact2Dataset(Dataset):
                 label = 0
 
             initial_shape = torch.tensor(frames.shape)[-2:] # (H, W)
-            frames = self._pad(frames).float() / 255.0
-            masks = self._pad(masks)
+            frames = self._size_op(frames).float() / 255.0
+            masks = (self._size_op(masks.unsqueeze(1)).squeeze(1) > 0.5).int()
             
             return frames, label, masks, initial_shape
         
@@ -121,8 +126,8 @@ class VideoFact2Dataset(Dataset):
                 label = 0
 
             initial_shape = torch.tensor(frame.shape)[-2:] # (H, W)
-            frame = self._pad(frame).float() / 255.0
-            mask = self._pad(mask)
+            frame = self._size_op(frame).float() / 255.0
+            mask = (self._size_op(mask.unsqueeze(0)).squeeze(0) > 0.5).int()
 
             return frame, label, mask, initial_shape
 

@@ -17,7 +17,6 @@ class VideoFact2InpaintingVIDNetDataset(Dataset):
         self.dataset = videofact2_dataset_obj
         self.is_training = is_training
 
-        assert self.dataset.return_frame_size is None, "return_frame_size must be None"
         assert self.dataset.return_type == "video", "return_type must be 'video'"
 
         self.transforms = Compose([

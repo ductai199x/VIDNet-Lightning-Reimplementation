@@ -34,49 +34,9 @@ def prepare_model(args: dict[str, Any]) -> VIDNetPLWrapper:
     training_config = TrainingConfig(**args["training_args"])
     if prev_ckpt:
         print(f"Loading from checkpoint: {prev_ckpt}...")
-        return VIDNetPLWrapper.load_from_checkpoint(prev_ckpt)
+        return VIDNetPLWrapper.load_from_checkpoint(prev_ckpt, encoder_config=encoder_config, decoder_config=decoder_config, training_config=training_config)
     else:
         return VIDNetPLWrapper(encoder_config, decoder_config, training_config)
-
-
-def prepare_datasets(args: dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
-    metadata = pd.read_csv(ds_metadata_path)
-    inpainting_subset = metadata.query("vid_id.str.contains('inpainting')")
-    train_ds = VideoFact2Dataset(
-        ds_root_dir,
-        inpainting_subset,
-        "train",
-        only_manipulated=True,
-        crfs=["crf0", "crf23"],
-        max_num_return_frames=args["training_args"]["max_seq_length"],
-        return_frame_size=None,
-    )
-    train_ds = VideoFact2InpaintingVIDNetDataset(train_ds, is_training=True)
-    val_ds = VideoFact2Dataset(
-        ds_root_dir,
-        inpainting_subset,
-        "val",
-        only_manipulated=True,
-        crfs=["crf0", "crf23"],
-        max_num_return_frames=args["training_args"]["max_seq_length"],
-        return_frame_size=None,
-    )
-    val_ds = VideoFact2InpaintingVIDNetDataset(val_ds, is_training=False)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=args["training_args"]["batch_size"],
-        shuffle=True,
-        num_workers=args["training_args"]["num_workers"],
-        persistent_workers=True,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=args["training_args"]["batch_size"],
-        shuffle=False,
-        num_workers=args["training_args"]["num_workers"],
-        persistent_workers=True,
-    )
-    return train_loader, val_loader
 
 
 def prepare_logger(args: dict[str, Any]) -> Tuple[Optional[Union[WandbLogger, TensorBoardLogger]], str]:
@@ -121,7 +81,6 @@ def prepare_logger(args: dict[str, Any]) -> Tuple[Optional[Union[WandbLogger, Te
 def train(args: argparse.Namespace) -> None:
     # define how the model is loaded in the prepare_model.py file
     model = prepare_model(args.__dict__)
-    train_dl, val_dl = prepare_datasets(args.__dict__)
     logger, log_path = prepare_logger(args.__dict__)
 
     lr_monitor = LearningRateMonitor(logging_interval="step")
@@ -134,9 +93,7 @@ def train(args: argparse.Namespace) -> None:
         save_top_k=2,
         mode="max",
     )
-    callbacks = [ModelSummary(-1), TQDMProgressBar(refresh_rate=1), model_ckpt] + (
-        [] if args.fast_dev_run else [lr_monitor]
-    )
+    callbacks = [] if args.fast_dev_run else [ModelSummary(-1), TQDMProgressBar(refresh_rate=1), model_ckpt, lr_monitor]
     if args.fast_dev_run:
         num_gpus = 1
     else:
@@ -150,10 +107,12 @@ def train(args: argparse.Namespace) -> None:
         profiler=None,
         callbacks=callbacks,
         fast_dev_run=args.fast_dev_run,
+        enable_checkpointing=not args.fast_dev_run,
+        log_every_n_steps=10,
     )
     if isinstance(logger, WandbLogger):
         logger.watch(model, log="all", log_freq=100)
-    trainer.fit(model, train_dl, val_dl, ckpt_path=args.prev_ckpt if args.resume else None)
+    trainer.fit(model, ckpt_path=args.prev_ckpt if args.resume else None)
 
 
 def parse_args(args: argparse.Namespace) -> argparse.Namespace:
@@ -226,8 +185,8 @@ def main():
     )
     parser.add_argument(
         "--gpus",
-        type=int,
-        help="number of gpus to use (-1 for all available gpus)",
+        type=lambda x: [int(i) for i in x.split(",")],
+        help="specify which GPUs to use (comma-separated list) or leave it alone to use all available GPUs",
         default=-1,
     )
     parser.add_argument(
